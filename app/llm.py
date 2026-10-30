@@ -90,7 +90,8 @@ def generate(prompt: str, system: str = "You are a helpful assistant.") -> str:
                 raise LLMError("LLM returned an empty response")
             return text.strip()
         except httpx.HTTPStatusError as e:
-            last_error = e
+            # Keep the provider's own message (e.g. "API key not valid", "model not found")
+            last_error = LLMError(f"HTTP {e.response.status_code}: {e.response.text[:300]}")
             # 4xx (bad key, bad request) won't fix itself -> stop retrying, except 429 rate limit
             if e.response.status_code < 500 and e.response.status_code != 429:
                 break
