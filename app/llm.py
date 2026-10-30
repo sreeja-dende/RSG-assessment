@@ -29,7 +29,8 @@ def _call_gemini(prompt: str, system: str) -> str:
     }
     r = httpx.post(
         url,
-        params={"key": settings.GEMINI_API_KEY},
+        # Key goes in a header, not the URL: URLs get written to logs
+        headers={"x-goog-api-key": settings.GEMINI_API_KEY},
         json=body,
         timeout=settings.LLM_TIMEOUT_SECONDS,
     )
