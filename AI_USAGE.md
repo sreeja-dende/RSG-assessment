@@ -10,24 +10,24 @@
 ## 2. How I used AI during development
 
 - **Breaking down the problem.** I gave the assignment and CSV to the assistant and agreed on the key design decision first: *the LLM interprets, the database calculates.* LLMs are unreliable at arithmetic and can invent figures, and the assignment requires answers backed by real queries.
-- **Generating code in stages:** data loading → SQL analytics → AI layer → API/UI → tests → docs. After each stage I ran the code and checked its output before moving on.
-- **Verifying results independently.** I calculated the expected answers separately with pandas (total ₹14,39,200; Monitor ₹4,73,000; South ₹4,11,200; May peak ₹3,18,500) and wrote tests that compare the app's results to them.
-- **Hunting for edge cases.** I asked the assistant what could go wrong (unknown names, destructive requests, missing months, malicious SQL), then wrote a test for each one.
-- **What I did not delegate:** running everything on my own machine, checking the numbers, deciding the business rules (returned orders excluded, missing price not imputed), and making sure I can explain every file.
+- **Generating code in stages:** data loading → SQL analytics → AI layer → API/UI → tests → docs. Each stage was run and checked before moving on, and I then ran the full project and its tests on my own machine.
+- **Checking results independently.** The expected answers were calculated separately with pandas (total ₹14,39,200; Monitor ₹4,73,000; South ₹4,11,200; May peak ₹3,18,500), and the tests compare the app's results to them.
+- **Hunting for edge cases.** I asked the assistant what could go wrong (unknown names, destructive requests, missing months, malicious SQL), and a test was added for each case.
+- **My own part:** setting up and running everything on my own machine, testing the app's answers, approving the business rules (returned orders excluded, missing price not imputed), and making sure I can explain every file.
 
 ## 3. Problems encountered and how I debugged them
 
 | # | Problem | How I found it | Fix |
 |---|---|---|---|
-| 1 | Every AI request failed with a **503** error | The log only said "LLM failure", so I improved `llm.py` to log the provider's own message. It showed `404: models/gemini-2.0-flash is no longer available`. | Switched to a current model, made the model configurable in `.env`, and kept the clearer error logging |
+| 1 | Every AI request failed with a **503** error | The log only said "LLM failure", so I improved `llm.py` to log the provider's own message. It showed `404: models/gemini-2.0-flash is no longer available`. | Switched to a current model, set in `.env`, and kept the clearer error logging |
 | 2 | "Total revenue for **Tablets**" returned the **overall** total, a confident wrong answer | Manual testing with unusual questions | The unknown word was being ignored. Names not found in the data are now detected and refused, listing the real products. Test added. |
 | 3 | "Delete all sales" was treated as a revenue question | Same manual testing | Write-type requests are refused (the database connection was already read-only). Test added. |
 | 4 | Dates are `DD-MM-YYYY`, so a default parser can read `03-01-2026` as 1 March | Inspected the raw CSV before writing any code | Parse with the explicit format `%d-%m-%Y`. A test checks TXN0001 is stored as `2026-01-03`. |
 | 5 | Planted bad rows: a returned order, quantity 0, a missing price | Profiled the CSV with pandas (`isna()`, `value_counts()`) | Validation rules, a `rejected_rows` table with reasons, and a revenue view that counts Completed orders only |
-| 6 | Risk: LLM-written SQL could change data or read other tables | Wrote attack tests: DELETE, DROP, `; DROP TABLE`, PRAGMA, ATTACH, hidden comments, a never-ending query | Four-layer guard in `sql_guard.py`: SELECT-only check, SQLite authorizer, read-only connection, row and work limits. All 11 attacks blocked. |
-| 7 | `with sqlite3.connect(...) as conn` does not actually close the connection | Code review | Used `contextlib.closing()` |
+| 6 | Risk: LLM-written SQL could change data or read other tables | Wrote attack tests: DELETE, DROP, `; DROP TABLE`, PRAGMA, ATTACH, hidden comments, a never-ending query | Four-layer guard in `sql_guard.py`: SELECT-only check, SQLite authorizer, read-only connection, row and work limits. All 10 attack queries blocked. |
+| 7 | The health-check endpoint used `with sqlite3.connect(...) as conn`, which commits but does not close the connection | Code review | Used `contextlib.closing()` |
 
-**General debugging approach:** reproduce the problem → read the *actual* error text (improving logging when it wasn't informative enough) → fix → add a test so it can't come back.
+**General debugging approach:** reproduce the problem → read the *actual* error text (improving logging when it wasn't informative enough) → fix → where possible, add a test so it can't come back.
 
 ## 4. What I would improve with another day
 

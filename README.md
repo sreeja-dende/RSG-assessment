@@ -176,7 +176,7 @@ POST /api/ask  {"question": "Which region generated the highest sales?"}
 |---|---|
 | `tests/test_ingest.py` | Supplied CSV: 49 loaded, 2 rejected with correct reasons; day-first dates; returned orders excluded; 10 invalid-row cases; duplicates; missing columns |
 | `tests/test_questions.py` | **Valid:** all 5 assignment questions with exact figures, filters, lowest, units. **Invalid:** profit, weather, delete, unknown product, customers, and 422 requests. **Edge cases:** compare with no month / one month / a month without data, filters with zero matches, disclosure of excluded rows |
-| `tests/test_ai_safety.py` | LLM intent used; invalid LLM output (prose with invented numbers, bad type, bad month, provider down) falls back to rules; unknown LLM values refused; text-to-SQL SELECT runs; 11 destructive or unsafe SQL attempts blocked; data intact after an attack; currency formatting |
+| `tests/test_ai_safety.py` | LLM intent used; invalid LLM output (prose with invented numbers, bad type, bad month, provider down) falls back to rules; unknown LLM values refused; text-to-SQL SELECT runs; 10 destructive or unsafe SQL queries blocked; data intact after an attack; currency formatting |
 
 ## 8. Known limitations
 
