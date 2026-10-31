@@ -19,15 +19,13 @@
 
 | # | Problem | How I found it | Fix |
 |---|---|---|---|
-| 1 | `python` was not found on Windows. A Microsoft Store placeholder ran instead. | Error message on the first command | Installed Python with *Add to PATH* and disabled the App execution aliases |
-| 2 | `pytest` failed: `ModuleNotFoundError: No module named 'app'` | Traceback pointed at the test import | Added `pytest.ini` with `pythonpath = .`, so the project root is importable |
-| 3 | Every AI request returned **503** | The server log showed only "LLM failure", so I improved `llm.py` to log the provider's own error message. That revealed `404: models/gemini-2.0-flash is no longer available`. | Switched to a current model and made the model configurable in `.env` |
-| 4 | **The API key appeared in plain text in the server log** | Noticed it in the log line for the request URL | The key was a URL query parameter, and the HTTP library logs URLs. Moved it to the `x-goog-api-key` header and **rotated the key**. |
-| 5 | "Total revenue for **Tablets**" returned the **overall** total, a confident wrong answer | Manual testing of unusual questions | The unknown word was being ignored. Added detection of unrecognised names after *for/of/in*. Now it refuses and lists the real products. Test added. |
-| 6 | "Delete all sales" was answered as a revenue question | Same manual test run | Added an explicit refusal for write-type requests (the database was never at risk, because the connection is read-only) |
-| 7 | Dates like `03-01-2026` are ambiguous (3 Jan or 1 March?) | Inspected the raw CSV before writing any code | Parse with the explicit format `%d-%m-%Y`. A test checks that TXN0001 is stored as `2026-01-03`. |
-| 8 | Data traps: a returned order, quantity 0, a missing price | Profiled the CSV with pandas (`isna()`, `value_counts()`) | Explicit validation rules, a `rejected_rows` table with reasons, and a revenue view that counts Completed orders only |
-| 9 | `with sqlite3.connect(...) as conn` does not actually close the connection | Code review | Used `contextlib.closing()` |
+| 1 | Every AI request failed with a **503** error | The log only said "LLM failure", so I improved `llm.py` to log the provider's own message. It showed `404: models/gemini-2.0-flash is no longer available`. | Switched to a current model, made the model configurable in `.env`, and kept the clearer error logging |
+| 2 | "Total revenue for **Tablets**" returned the **overall** total, a confident wrong answer | Manual testing with unusual questions | The unknown word was being ignored. Names not found in the data are now detected and refused, listing the real products. Test added. |
+| 3 | "Delete all sales" was treated as a revenue question | Same manual testing | Write-type requests are refused (the database connection was already read-only). Test added. |
+| 4 | Dates are `DD-MM-YYYY`, so a default parser can read `03-01-2026` as 1 March | Inspected the raw CSV before writing any code | Parse with the explicit format `%d-%m-%Y`. A test checks TXN0001 is stored as `2026-01-03`. |
+| 5 | Planted bad rows: a returned order, quantity 0, a missing price | Profiled the CSV with pandas (`isna()`, `value_counts()`) | Validation rules, a `rejected_rows` table with reasons, and a revenue view that counts Completed orders only |
+| 6 | Risk: LLM-written SQL could change data or read other tables | Wrote attack tests: DELETE, DROP, `; DROP TABLE`, PRAGMA, ATTACH, hidden comments, a never-ending query | Four-layer guard in `sql_guard.py`: SELECT-only check, SQLite authorizer, read-only connection, row and work limits. All 11 attacks blocked. |
+| 7 | `with sqlite3.connect(...) as conn` does not actually close the connection | Code review | Used `contextlib.closing()` |
 
 **General debugging approach:** reproduce the problem → read the *actual* error text (improving logging when it wasn't informative enough) → fix → add a test so it can't come back.
 
