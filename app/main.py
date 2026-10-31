@@ -1,159 +1,110 @@
-"""FastAPI app: the HTTP API.
+"""FastAPI app: HTTP API + the web page.
 
 Endpoints
-  GET    /health                 -> is the app up?
-  POST   /documents              -> add a document (auto-chunked)
-  GET    /documents              -> list documents
-  GET    /documents/{id}         -> one document
-  DELETE /documents/{id}         -> delete (chunks deleted by cascade)
-  POST   /ask                    -> RAG answer with sources
-  POST   /agent                  -> agent answer with the steps it took
-  GET    /logs                   -> recent question/answer history
-
-Open http://127.0.0.1:8000/docs for interactive Swagger UI (free "UI").
+  GET  /                  -> simple web UI (app/static/index.html)
+  GET  /health            -> is the app up, how many rows are loaded
+  POST /api/ask           -> {"question": "..."} -> answer + supporting data
+  GET  /api/data-quality  -> rows rejected while loading the CSV, and why
+  GET  /api/examples      -> example questions
+  GET  /docs              -> interactive API docs (Swagger, built into FastAPI)
 """
+import json
 import logging
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, closing
+from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, RedirectResponse
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse
 
-from app import rag
-from app.agent import build_tools, run_agent
-from app.db import SessionLocal, get_db, init_db
-from app.llm import LLMError, generate
-from app.models import Chunk, Document, QueryLog
-from app.schemas import (AgentResponse, AskRequest, AskResponse, DocumentCreate,
-                         DocumentOut, Source)
+from app.db import get_readonly_connection
+from app.ingest import load_csv
+from app.schemas import AskRequest, AskResponse
+from app.service import answer_question
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("app")
+STATIC = Path(__file__).parent / "static"
+
+EXAMPLES = [
+    "What is the total revenue?",
+    "Which product generated the highest revenue?",
+    "What is the monthly revenue trend?",
+    "Which region generated the highest sales?",
+    "How did revenue change between April and May?",
+    "Which product sold the most units?",
+    "What is our profit margin?",
+]
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    init_db()
+    report = load_csv()  # rebuild the DB from the CSV on every start
+    log.info("Startup: %d rows loaded, %d rejected", report.loaded_rows, len(report.rejected))
     yield
 
 
-app = FastAPI(title="RSG Assessment Starter", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="Mini AI Business Intelligence Assistant", version="1.0.0", lifespan=lifespan)
 
 
-# ---------- Error handling: clean JSON errors, never a raw stack trace ----------
+# ---------- Error handling: always clean JSON, never a stack trace ----------
 
-@app.exception_handler(LLMError)
-async def llm_error_handler(_req: Request, exc: LLMError):
-    log.error("LLM failure: %s", exc)
-    return JSONResponse(status_code=503, content={"detail": "AI service unavailable, try again."})
+@app.exception_handler(RequestValidationError)
+async def validation_error(_req: Request, exc: RequestValidationError):
+    messages = [f"{'.'.join(str(p) for p in e['loc'][1:]) or 'body'}: {e['msg']}" for e in exc.errors()]
+    return JSONResponse(status_code=422, content={"error": "invalid_request", "details": messages})
+
+
+@app.exception_handler(FileNotFoundError)
+async def missing_data(_req: Request, exc: FileNotFoundError):
+    log.error("Missing data: %s", exc)
+    return JSONResponse(status_code=503, content={"error": "data_unavailable", "details": [str(exc)]})
 
 
 @app.exception_handler(Exception)
-async def unhandled_error_handler(_req: Request, exc: Exception):
+async def unexpected_error(_req: Request, exc: Exception):
     log.exception("Unhandled error")
-    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
-
-
-# ---------- Helpers ----------
-
-def _to_out(doc: Document, db: Session) -> DocumentOut:
-    count = db.scalar(select(func.count(Chunk.id)).where(Chunk.document_id == doc.id))
-    return DocumentOut(id=doc.id, title=doc.title, created_at=doc.created_at, chunk_count=count or 0)
-
-
-def _retrieve(db: Session, question: str, top_k: int) -> list[tuple[Chunk, float]]:
-    rows = db.execute(select(Chunk.id, Chunk.text)).all()
-    ranked = rag.bm25_search(question, [(r.id, r.text) for r in rows], top_k=top_k)
-    by_id = {c.id: c for c in db.scalars(select(Chunk).where(Chunk.id.in_([i for i, _ in ranked])))}
-    return [(by_id[i], s) for i, s in ranked]
+    return JSONResponse(status_code=500, content={"error": "internal_error",
+                                                  "details": ["Something went wrong. Check the server log."]})
 
 
 # ---------- Routes ----------
 
 @app.get("/", include_in_schema=False)
-def root():
-    return RedirectResponse(url="/docs")
+def ui():
+    return FileResponse(STATIC / "index.html")
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    with closing(get_readonly_connection()) as conn:  # closing() really closes it
+        rows = conn.execute("SELECT COUNT(*) FROM sales").fetchone()[0]
+    return {"status": "ok", "rows_loaded": rows}
 
 
-@app.post("/documents", response_model=DocumentOut, status_code=201)
-def create_document(payload: DocumentCreate, db: Session = Depends(get_db)):
-    pieces = rag.chunk_text(payload.content)
-    if not pieces:
-        raise HTTPException(status_code=422, detail="Content has no words")
-    doc = Document(title=payload.title.strip(), content=payload.content)
-    doc.chunks = [Chunk(position=i, text=t) for i, t in enumerate(pieces)]
-    db.add(doc)
-    db.commit()  # one transaction: document + chunks saved together, or not at all
-    db.refresh(doc)
-    log.info("Created document %s with %d chunks", doc.id, len(pieces))
-    return _to_out(doc, db)
+@app.post("/api/ask", response_model=AskResponse)
+def ask(payload: AskRequest):
+    log.info("Question: %s", payload.question)
+    response = answer_question(payload.question)
+    log.info("-> %s via %s: %s", response.intent.type, response.interpreted_by, response.answer[:120])
+    return response
 
 
-@app.get("/documents", response_model=list[DocumentOut])
-def list_documents(skip: int = 0, limit: int = 50, db: Session = Depends(get_db)):
-    limit = max(1, min(limit, 100))
-    docs = db.scalars(select(Document).order_by(Document.id).offset(max(skip, 0)).limit(limit)).all()
-    return [_to_out(d, db) for d in docs]
+@app.get("/api/data-quality")
+def data_quality():
+    conn = get_readonly_connection()
+    try:
+        rejected = [{"csv_line": r["source_line"], "reason": r["reason"], "row": json.loads(r["raw_data"])}
+                    for r in conn.execute("SELECT * FROM rejected_rows ORDER BY source_line")]
+        statuses = {r[0]: r[1] for r in conn.execute("SELECT status, COUNT(*) FROM sales GROUP BY status")}
+        loaded = conn.execute("SELECT COUNT(*) FROM sales").fetchone()[0]
+    finally:
+        conn.close()
+    return {"rows_loaded": loaded, "rows_rejected": len(rejected), "orders_by_status": statuses,
+            "revenue_rule": "Completed orders only; revenue = quantity x unit_price - discount_amount",
+            "rejected_rows": rejected}
 
 
-@app.get("/documents/{doc_id}", response_model=DocumentOut)
-def get_document(doc_id: int, db: Session = Depends(get_db)):
-    doc = db.get(Document, doc_id)
-    if doc is None:
-        raise HTTPException(status_code=404, detail="Document not found")
-    return _to_out(doc, db)
-
-
-@app.delete("/documents/{doc_id}", status_code=204)
-def delete_document(doc_id: int, db: Session = Depends(get_db)):
-    doc = db.get(Document, doc_id)
-    if doc is None:
-        raise HTTPException(status_code=404, detail="Document not found")
-    db.delete(doc)
-    db.commit()
-
-
-@app.post("/ask", response_model=AskResponse)
-def ask(payload: AskRequest, db: Session = Depends(get_db)):
-    hits = _retrieve(db, payload.question, payload.top_k)
-    if not hits:
-        # Don't call the LLM with no context -> saves cost, avoids hallucination
-        answer = "I don't know based on the documents."
-    else:
-        prompt = rag.build_prompt(payload.question, [(c.id, c.text) for c, _ in hits])
-        answer = generate(prompt, system=rag.RAG_SYSTEM)
-
-    sources = [Source(chunk_id=c.id, document_id=c.document_id, score=s, preview=c.text[:150])
-               for c, s in hits]
-    db.add(QueryLog(question=payload.question, answer=answer, mode="rag",
-                    source_chunk_ids=",".join(str(c.id) for c, _ in hits)))
-    db.commit()
-    return AskResponse(answer=answer, sources=sources, mode="rag")
-
-
-@app.post("/agent", response_model=AgentResponse)
-def agent(payload: AskRequest):
-    def search_fn(query: str) -> str:
-        # Own session: tools may run outside the request's DB lifecycle
-        with SessionLocal() as s:
-            hits = _retrieve(s, query, 3)
-            return "\n".join(f"[chunk {c.id}] {c.text[:400]}" for c, _ in hits) or "no results"
-
-    answer, steps = run_agent(payload.question, build_tools(search_fn))
-    with SessionLocal() as s:
-        s.add(QueryLog(question=payload.question, answer=answer, mode="agent"))
-        s.commit()
-    return AgentResponse(answer=answer, steps=steps)
-
-
-@app.get("/logs")
-def logs(limit: int = 20, db: Session = Depends(get_db)):
-    rows = db.scalars(select(QueryLog).order_by(QueryLog.id.desc()).limit(max(1, min(limit, 100)))).all()
-    return [{"id": r.id, "mode": r.mode, "question": r.question, "answer": r.answer,
-             "sources": r.source_chunk_ids, "at": r.created_at} for r in rows]
+@app.get("/api/examples")
+def examples():
+    return {"examples": EXAMPLES}

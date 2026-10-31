@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sales BI Assistant</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1d2433; --muted:#667085; --line:#e4e7ec;
+          --accent:#2f6fed; --warn-bg:#fff7e6; --warn:#8a5a00; --bad-bg:#fdecec; --bad:#a1281e; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; background:var(--bg); color:var(--ink); }
+  main { max-width: 860px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  form { display:flex; gap:8px; }
+  input { flex:1; padding:12px 14px; font-size:15px; border:1px solid var(--line); border-radius:8px; background:#fff; min-width:0; }
+  button { padding:12px 18px; font-size:15px; border:0; border-radius:8px; background:var(--accent); color:#fff; cursor:pointer; }
+  button:disabled { opacity:.6; cursor:wait; }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; margin:12px 0 24px; }
+  .chip { background:#fff; color:var(--ink); border:1px solid var(--line); padding:6px 10px; font-size:13px; border-radius:999px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:18px; margin-bottom:14px; }
+  .answer { font-size:17px; }
+  .unsupported { background:var(--bad-bg); color:var(--bad); border-color:#f5c2bd; }
+  .warn { background:var(--warn-bg); color:var(--warn); border-radius:8px; padding:8px 12px; margin:10px 0 0; font-size:13px; }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  th, td { text-align:left; padding:7px 8px; border-bottom:1px solid var(--line); }
+  th { color:var(--muted); font-weight:600; }
+  td.num { text-align:right; font-variant-numeric: tabular-nums; white-space:nowrap; }
+  .bar { height:8px; background:var(--accent); border-radius:4px; opacity:.75; }
+  details summary { cursor:pointer; color:var(--muted); }
+  pre { background:#f2f4f7; padding:10px; border-radius:6px; overflow-x:auto; font-size:12.5px; }
+  .tag { display:inline-block; font-size:12px; padding:2px 8px; border-radius:999px; background:#eef2ff; color:#3538cd; margin-left:6px; }
+  .label { font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; margin:0 0 6px; }
+  .scroll { overflow-x:auto; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Sales BI Assistant</h1>
+  <p class="sub">Ask a question about the sales data. Every number is computed by a database query.</p>
+
+  <form id="form">
+    <input id="q" placeholder="e.g. Which region generated the highest sales?" maxlength="500" autocomplete="off">
+    <button id="go" type="submit">Ask</button>
+  </form>
+  <div class="chips" id="chips"></div>
+
+  <div id="out"></div>
+</main>
+
+<script>
+const out = document.getElementById("out");
+const input = document.getElementById("q");
+const btn = document.getElementById("go");
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+function fmt(v) {
+  if (typeof v === "number") return v.toLocaleString("en-IN", {maximumFractionDigits: 2});
+  return v === null ? "—" : esc(v);
+}
+
+function render(data) {
+  const ok = data.status === "answered";
+  let html = `<div class="card ${ok ? "" : "unsupported"}">
+      <p class="label">Answer <span class="tag">interpreted by ${esc(data.interpreted_by)}</span></p>
+      <div class="answer">${esc(data.answer)}</div>
+      ${(data.warnings || []).map(w => `<p class="warn">${esc(w)}</p>`).join("")}
+    </div>`;
+
+  const sd = data.supporting_data;
+  if (sd && sd.rows.length) {
+    // draw a bar for the first numeric column, so rankings and trends are easy to see
+    const numCol = sd.columns.findIndex((_, i) => sd.rows.every(r => typeof r[i] === "number" || r[i] === null));
+    const max = numCol >= 0 ? Math.max(...sd.rows.map(r => Math.abs(r[numCol] || 0))) : 0;
+    html += `<div class="card"><p class="label">Supporting data</p><div class="scroll"><table>
+      <tr>${sd.columns.map(c => `<th>${esc(c)}</th>`).join("")}${max && sd.rows.length > 1 ? "<th></th>" : ""}</tr>
+      ${sd.rows.map(r => `<tr>${r.map(v => `<td class="${typeof v === "number" ? "num" : ""}">${fmt(v)}</td>`).join("")}
+        ${max && sd.rows.length > 1 ? `<td style="width:30%"><div class="bar" style="width:${Math.abs(r[numCol] || 0) / max * 100}%"></div></td>` : ""}</tr>`).join("")}
+    </table></div></div>`;
+  }
+
+  html += `<div class="card"><details><summary>How this was answered</summary>
+      <p class="label" style="margin-top:12px">Interpreted intent</p><pre>${esc(JSON.stringify(data.intent, null, 2))}</pre>
+      ${sd ? `<p class="label">SQL executed</p><pre>${esc(sd.sql)}</pre>
+              <p class="label">Parameters</p><pre>${esc(JSON.stringify(sd.params))}</pre>` : ""}
+    </details></div>`;
+  out.innerHTML = html;
+}
+
+async function ask(question) {
+  btn.disabled = true;
+  out.innerHTML = `<div class="card">Thinking…</div>`;
+  try {
+    const res = await fetch("/api/ask", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({question})
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      out.innerHTML = `<div class="card unsupported">Request failed (${res.status}): ${esc((data.details || [data.error]).join("; "))}</div>`;
+    } else {
+      render(data);
+    }
+  } catch (e) {
+    out.innerHTML = `<div class="card unsupported">Could not reach the server. Is it running?</div>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+document.getElementById("form").addEventListener("submit", e => {
+  e.preventDefault();
+  ask(input.value);
+});
+
+fetch("/api/examples").then(r => r.json()).then(d => {
+  document.getElementById("chips").innerHTML = d.examples
+    .map(q => `<button class="chip" type="button">${esc(q)}</button>`).join("");
+  document.querySelectorAll(".chip").forEach(b => b.addEventListener("click", () => {
+    input.value = b.textContent; ask(b.textContent);
+  }));
+}).catch(() => {});
+</script>
+</body>
+</html>
